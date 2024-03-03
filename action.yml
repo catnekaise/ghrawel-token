@@ -1,0 +1,247 @@
+name: ghrawel-token
+description: "Get Token from a deployed instance of https://github.com/catnekaise/ghrawel"
+branding:
+  icon: chevrons-right
+  color: blue
+inputs:
+  base-url:
+    required: true
+    description: "Base Url"
+  provider-name:
+    required: true
+    description: "Provider Name"
+  aws-region:
+    required: false
+    description: "AWS Region"
+  auth-type:
+    required: false
+    description: "Use"
+    default: "environment"
+  owner:
+    required: false
+    description: "Defaults to organization or user where GitHub Actions is running."
+  repo:
+    required: false
+    description: "Defaults to name of repo where GitHub Actions is running."
+  owner-endpoint:
+    required: false
+    description: "Owner Endpoint"
+  cognito-identity-pool-id:
+    required: false
+    description: "Cognito Identity Pool ID"
+  aws-account-id:
+    required: false
+    description: "AWS Account ID"
+  cognito-identity-role-arn:
+    required: false
+    description: "Custom Role Arn"
+  cognito-identity-audience:
+    default: "cognito-identity.amazonaws.com"
+    required: false
+    description: "Audience"
+  aws-access-key-id:
+    description: "AWS access key id (requires auth-type=provided)"
+    required: false
+  aws-secret-access-key:
+    description: "AWS secret access key (requires auth-type=provided)"
+    required: false
+  aws-session-token:
+    description: "AWS session token (requires auth-type=provided)"
+    required: false
+outputs:
+  token:
+    description: Token
+    value: "${{ steps.token.outputs.token }}"
+runs:
+  using: composite
+  steps:
+    - id: aws_region
+      name: "Resolve AWS Region"
+      shell: bash
+      env:
+        INPUT_AWS_REGION: "${{ inputs.aws-region }}"
+      run: |
+        value=""
+        
+        if [ ! -z "${AWS_DEFAULT_REGION}" ]; then
+          value="$AWS_DEFAULT_REGION"
+        fi
+        
+        if [ ! -z "${AWS_REGION}" ]; then
+          value="$AWS_REGION"
+        fi
+
+        if [ ! -z "${INPUT_AWS_REGION}" ]; then
+          value="$INPUT_AWS_REGION"
+        fi
+        
+        if [ -z "$value" ]; then
+          echo "Unable to resolve what AWS Region to use"
+          exit 1
+        fi
+        
+        # Some-effort validation of aws region
+        if echo "$value" | grep -Eqv "^[a-z]{2}-[a-z]{4,9}-[0-9]$"; then
+          echo "Resolved value for AWS Region is invalid"
+          exit 1
+        fi
+
+        echo "value=$value" >> "$GITHUB_OUTPUT"
+
+    - id: target
+      name: "Resolve Owner and Repo"
+      shell: bash
+      env:
+        INPUT_OWNER: "${{ inputs.owner }}"
+        INPUT_REPO: "${{ inputs.repo }}"
+      run: |
+        owner="$INPUT_OWNER"
+        repo="$INPUT_REPO"
+        
+        if [ -z "$owner" ]; then
+          owner="$GITHUB_REPOSITORY_OWNER"
+        fi
+        
+        if [ -z "$repo" ]; then
+          repo="${GITHUB_REPOSITORY##*/}"
+        fi        
+        
+        echo "owner=$owner" >> "$GITHUB_OUTPUT"
+        echo "repo=$repo" >> "$GITHUB_OUTPUT"
+
+    - id: auth_enhanced
+      name: Cognito Identity Enhanced Auth-Flow
+      if: "${{ inputs.auth-type == 'cognito-identity-enhanced' }}"
+      uses: catnekaise/cognito-idpool-auth@v1
+      with:
+        auth-flow: "enhanced"
+        cognito-identity-pool-id: "${{ inputs.cognito-identity-pool-id }}"
+        aws-account-id: "${{ inputs.aws-account-id }}"
+        aws-region: "${{ steps.aws_region.outputs.value }}"
+        audience: "${{ inputs.audience }}"
+
+    - id: auth_basic
+      name: "Cognito Identity Basic Auth-Flow"
+      if: "${{ inputs.auth-type == 'cognito-identity-basic' }}"
+      uses: catnekaise/cognito-idpool-auth@v1
+      with:
+        auth-flow: "basic"
+        cognito-identity-pool-id: "${{ inputs.cognito-identity-pool-id }}"
+        aws-account-id: "${{ inputs.aws-account-id }}"
+        aws-region: "${{ steps.aws_region.outputs.value }}"
+        audience: "${{ inputs.cognito-identity-audience }}"
+        role-arn: "${{ inputs.cognito-identity-role-arn }}"
+
+    - id: credentials
+      name: "Select Credentials"
+      shell: bash
+      env:
+        AUTH_TYPE: "${{ inputs.auth-type }}"
+      run: |
+        awsAccessKeyId=""
+        awsSecretAccessKey=""
+        awsSessionToken=""
+        
+        if [ "$AUTH_TYPE" == "environment" ]; then
+          awsAccessKeyId=$(echo "$AWS_ACCESS_KEY_ID")
+          awsSecretAccessKey=$(echo "$AWS_SECRET_ACCESS_KEY")
+          awsSessionToken=$(echo "$AWS_SESSION_TOKEN")
+        fi
+        
+        if [ "$AUTH_TYPE" == "provided" ]; then
+          awsAccessKeyId="${{ inputs.aws-access-key-id }}"
+          awsSecretAccessKey="${{ inputs.aws-secret-access-key }}"
+          awsSessionToken="${{ inputs.aws-session-token }}"
+        fi    
+        
+        if [ "$AUTH_TYPE" == "cognito-identity-enhanced" ]; then
+          awsAccessKeyId="${{ steps.auth_enhanced.outputs.aws_access_key_id }}"
+          awsSecretAccessKey="${{ steps.auth_enhanced.outputs.aws_secret_access_key }}"
+          awsSessionToken="${{ steps.auth_enhanced.outputs.aws_session_token }}"
+        fi    
+        
+        if [ "$AUTH_TYPE" == "cognito-identity-basic" ]; then
+          awsAccessKeyId="${{ steps.auth_basic.outputs.aws_access_key_id }}"
+          awsSecretAccessKey="${{ steps.auth_basic.outputs.aws_secret_access_key }}"
+          awsSessionToken="${{ steps.auth_basic.outputs.aws_session_token }}"
+        fi    
+        
+        echo "::add-mask::$awsAccessKeyId"
+        echo "::add-mask::$awsSecretAccessKey"
+        echo "::add-mask::$awsSessionToken"
+        
+        echo "aws_access_key_id=$awsAccessKeyId" >> "$GITHUB_OUTPUT"
+        echo "aws_secret_access_key=$awsSecretAccessKey" >> "$GITHUB_OUTPUT"
+        echo "aws_session_token=$awsSessionToken" >> "$GITHUB_OUTPUT"
+
+    - id: url
+      name: "Resolve Full URL"
+      shell: bash
+      env:
+        BASE_URL: "${{ inputs.base-url }}"
+        PROVIDER_NAME: "${{ inputs.provider-name }}"
+        TARGET_OWNER: "${{ steps.target.outputs.owner }}"
+        TARGET_REPO: "${{ steps.target.outputs.repo }}"
+        OWNER_ENDPOINT: "${{ inputs.owner-endpoint }}"
+      run: |
+        url="${BASE_URL}"
+        
+        # Remove trailing slash
+        if echo "$url" | grep -Eq "/$"; then
+          url=${url%?}
+        fi
+        
+        url+="/x/${PROVIDER_NAME}/${TARGET_OWNER}"
+        
+        if echo "${TARGET_REPO}" | grep -Eq ","; then
+          url+="?repo=${TARGET_REPO}"
+        elif [ "${OWNER_ENDPOINT}" == "true" ]; then
+          url+="?repo=${TARGET_REPO}"
+        elif [ -n "${TARGET_REPO}" ]; then
+          url+="/${TARGET_REPO}"
+        fi
+
+        echo "url=$url" >> "$GITHUB_OUTPUT"
+
+    - id: token
+      name: "Get Token"
+
+      shell: bash
+      env:
+        AUTH_TYPE: "${{ inputs.auth-type }}"
+        AWS_REGION: "${{ steps.aws_region.outputs.value }}"
+        AWS_ACCESS_KEY_ID: "${{ steps.credentials.outputs.aws_access_key_id }}"
+        AWS_SECRET_ACCESS_KEY: "${{ steps.credentials.outputs.aws_secret_access_key }}"
+        AWS_SESSION_TOKEN: "${{ steps.credentials.outputs.aws_session_token }}"
+        URL: "${{ steps.url.outputs.url }}"
+      run: |
+        response=$(curl -s -w "\n%{http_code}" "${URL}" \
+        --user "${AWS_ACCESS_KEY_ID}":"${AWS_SECRET_ACCESS_KEY}" \
+        -H "x-amz-security-token: ${AWS_SESSION_TOKEN}" \
+        --aws-sigv4 "aws:amz:${AWS_REGION}:execute-api")
+
+        statusCode=$(tail -n1 <<< "$response")
+        bodyContent=$(sed '$ d' <<< "$response")
+        
+        if [ "${statusCode}" == "403" ]; then
+          echo "::error::Not authorized (403)"
+          exit 1
+        elif [ "${statusCode}" == "404" ]; then
+          echo "::error::Not Found (404)"
+          exit 1
+        elif [ "${statusCode}" == "400" ]; then
+          err_msg=$(echo "${bodyContent}" | jq -r '.message')
+          echo "::error::Bad Request (400) - ${err_msg}"
+          exit 1
+        elif [ "${statusCode}" == "500" ]; then
+          err_msg=$(echo "${bodyContent}" | jq -r '.message')
+          echo "::error::Internal Server Error (500) - ${err_msg}"
+          exit 1
+        elif [ "${statusCode}" == "201" ]; then
+          token=$(echo "${bodyContent}" | jq -r '.token')
+          echo "::add-mask::$token"
+          echo "token=$token" >> "$GITHUB_OUTPUT"
+        else
+          echo "::error::Unknown response (${statusCode})"
+          exit 1
+        fi
